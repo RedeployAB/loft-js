@@ -236,15 +236,17 @@ async function aiChat(messages: LoftChatMessage[], opts?: { onToken?: (token: st
   if (!res.ok) throw new Error(`loft.ai: ${res.status} ${await res.text().catch(() => "")}`.trim());
 
   if (!opts?.onToken || !res.body) {
-    const { content } = (await res.json()) as { content: string };
-    return content;
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    return data.choices?.[0]?.message?.content ?? "";
   }
 
+  // Standard chat-completions stream: `data: {chunk}` frames carrying choices[0].delta.content,
+  // terminated by a `data: [DONE]` line. A missing [DONE] means the reply was truncated.
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let full = "";
-  let done = false; // the server sends a terminal {done:true}; its absence means a truncated reply
+  let done = false;
   for (;;) {
     const chunk = await reader.read();
     if (chunk.done) break;
@@ -254,16 +256,19 @@ async function aiChat(messages: LoftChatMessage[], opts?: { onToken?: (token: st
       const line = buffer.slice(0, i).split("\n").find((l) => l.startsWith("data:"));
       buffer = buffer.slice(i + 2);
       if (!line) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") {
+        done = true;
+        continue;
+      }
       try {
-        const evt = JSON.parse(line.slice(5).trim()) as { t?: string; done?: boolean; error?: string };
-        if (evt.error) throw new Error(`loft.ai: ${evt.error}`);
-        if (evt.done) done = true;
-        if (evt.t) {
-          full += evt.t;
-          opts.onToken(evt.t);
+        const evt = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+        const token = evt.choices?.[0]?.delta?.content;
+        if (token) {
+          full += token;
+          opts.onToken(token);
         }
-      } catch (e) {
-        if (e instanceof Error && e.message.startsWith("loft.ai:")) throw e;
+      } catch {
         /* ignore malformed/partial SSE frames */
       }
     }
