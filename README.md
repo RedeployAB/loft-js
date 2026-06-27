@@ -1,4 +1,4 @@
-# Loft SDK
+# loft-js
 
 A small typed browser SDK for apps hosted on Loft. It wraps the Loft backend so your app can
 call identity, uploads, a document database, AI chat, and realtime channels without writing fetch
