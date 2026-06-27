@@ -46,6 +46,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "sri": "pnpm run build:cdn && node scripts/sri.mjs",
     "prepack": "pnpm run build"
   },
   "devDependencies": {
