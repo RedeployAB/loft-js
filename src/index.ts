@@ -54,10 +54,12 @@ function failResponse(label: string, status: number, detail?: string): never {
 }
 
 // Run a fetch and normalise its non-HTTP failures (a rejected request, a cancel, a timeout) into a
-// LoftError. A completed response is returned as-is, ok or not, for the caller to interpret.
+// LoftError. A completed response is returned as-is, ok or not, for the caller to interpret. Every
+// loft endpoint is same-origin and cookie-authenticated, so credentials is set here once rather
+// than at each call site (it is also the fetch default, but the SDK's auth model is explicit here).
 async function httpFetch(url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    return await fetch(url, { credentials: "same-origin", ...init });
   } catch (cause) {
     // AbortSignal.timeout() aborts with a TimeoutError, a plain controller.abort() with an
     // AbortError; keep them as distinct kinds so a caller can retry a timeout but not a cancel.
@@ -111,7 +113,7 @@ export interface LoftUploadOptions extends LoftRequestOptions {
 
 /** The signed-in user, from the auth proxy's identity headers. */
 async function me(opts?: LoftRequestOptions): Promise<LoftUser> {
-  const res = await httpFetch("/api/me", withSignal({ credentials: "same-origin" }, opts));
+  const res = await httpFetch("/api/me", withSignal({}, opts));
   if (!res.ok) failResponse("/api/me", res.status);
   return readJson<LoftUser>(res, "/api/me");
 }
@@ -122,7 +124,6 @@ async function upload(file: File | Blob, opts?: LoftUploadOptions): Promise<Loft
   const filename = opts?.name ?? (file instanceof File ? file.name : "file");
   const res = await httpFetch("/api/upload", withSignal({
     method: "POST",
-    credentials: "same-origin",
     headers: {
       // Percent-encode: a header value must be Latin1, so a raw non-ASCII or newline-bearing
       // filename would make Request construction throw. The server decodes it.
@@ -140,7 +141,6 @@ async function upload(file: File | Blob, opts?: LoftUploadOptions): Promise<Loft
 async function uploadDelete(url: string, opts?: LoftRequestOptions): Promise<void> {
   const res = await httpFetch(`/api/upload?path=${encodeURIComponent(url)}`, withSignal({
     method: "DELETE",
-    credentials: "same-origin",
   }, opts));
   if (res.status === 404) return;
   if (!res.ok) failResponse("/api/upload delete", res.status);
@@ -167,7 +167,7 @@ async function req(
   opts?: LoftRequestOptions,
   nullable = false,
 ): Promise<unknown> {
-  const init: RequestInit = { method, credentials: "same-origin" };
+  const init: RequestInit = { method };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
@@ -282,11 +282,12 @@ function collection<T = Record<string, unknown>>(
   opts?: { ownerOnly?: boolean },
 ): LoftCollection<T> {
   const base = `/api/db/${encodeURIComponent(name)}`;
+  const docUrl = (id: string): string => `${base}/${encodeURIComponent(id)}`;
   return {
     create: (doc: T, o?: LoftRequestOptions) =>
       req("POST", opts?.ownerOnly ? `${base}?ownerOnly=1` : base, doc, o) as Promise<LoftDoc<T>>,
     get: (id: string, o?: LoftRequestOptions) =>
-      req("GET", `${base}/${encodeURIComponent(id)}`, undefined, o, true) as Promise<LoftDoc<T> | null>,
+      req("GET", docUrl(id), undefined, o, true) as Promise<LoftDoc<T> | null>,
     list: (o?: { limit?: number } & LoftRequestOptions) =>
       req(
         "GET",
@@ -295,9 +296,9 @@ function collection<T = Record<string, unknown>>(
         o,
       ) as Promise<LoftDoc<T>[]>,
     update: (id: string, patch: Partial<T>, o?: LoftRequestOptions) =>
-      req("PATCH", `${base}/${encodeURIComponent(id)}`, patch, o, true) as Promise<LoftDoc<T> | null>,
+      req("PATCH", docUrl(id), patch, o, true) as Promise<LoftDoc<T> | null>,
     delete: (id: string, o?: LoftRequestOptions) =>
-      req("DELETE", `${base}/${encodeURIComponent(id)}`, undefined, o, true).then((r) => r !== null),
+      req("DELETE", docUrl(id), undefined, o, true).then((r) => r !== null),
 
     /**
      * Subscribe to live changes in this collection (other clients' writes too). Returns an
@@ -412,6 +413,23 @@ function errorDetail(text: string): string {
   return text.length > 300 ? text.slice(0, 300) + "…" : text;
 }
 
+// POST the conversation to the chat endpoint. chat() and stream() send the identical request; only
+// the stream flag and how they read the response differ, so the request and its error handling live
+// here once.
+async function aiRequest(
+  messages: LoftChatMessage[],
+  stream: boolean,
+  opts?: LoftRequestOptions,
+): Promise<Response> {
+  const res = await httpFetch("/api/ai/chat", withSignal({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, stream }),
+  }, opts));
+  if (!res.ok) failResponse("/api/ai/chat", res.status, errorDetail(await res.text().catch(() => "")));
+  return res;
+}
+
 /**
  * Send a chat conversation to the platform's model and resolve to the assistant's full reply.
  * For token-by-token output use loft.ai.stream() instead.
@@ -419,13 +437,7 @@ function errorDetail(text: string): string {
  * Pass `signal` to cancel: a cancel rejects with kind "aborted", a timeout with kind "timeout".
  */
 async function aiChat(messages: LoftChatMessage[], opts?: LoftRequestOptions): Promise<string> {
-  const res = await httpFetch("/api/ai/chat", withSignal({
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: false }),
-  }, opts));
-  if (!res.ok) failResponse("/api/ai/chat", res.status, errorDetail(await res.text().catch(() => "")));
+  const res = await aiRequest(messages, false, opts);
   const data = await readJson<{ choices?: { message?: { content?: string } }[] }>(res, "/api/ai/chat");
   return data.choices?.[0]?.message?.content ?? "";
 }
@@ -441,13 +453,7 @@ async function* aiStream(
   messages: LoftChatMessage[],
   opts?: LoftRequestOptions,
 ): AsyncGenerator<string, void, unknown> {
-  const res = await httpFetch("/api/ai/chat", withSignal({
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: true }),
-  }, opts));
-  if (!res.ok) failResponse("/api/ai/chat", res.status, errorDetail(await res.text().catch(() => "")));
+  const res = await aiRequest(messages, true, opts);
   if (!res.body) throw new LoftError("stream", "loft.ai: the server returned no stream body");
 
   // Standard chat-completions stream: SSE `data:` frames carrying choices[0].delta.content,
