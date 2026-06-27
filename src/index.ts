@@ -10,6 +10,66 @@
 // work once it is published. Every call is same-origin to loftd, which holds all credentials
 // and keys server-side, so nothing secret reaches the browser.
 
+/**
+ * Every loft call rejects with a LoftError on failure. Switch on `kind` to handle one; `status`
+ * carries the HTTP status when the failure came from a response (otherwise undefined), and the
+ * underlying cause (a network error, an AbortError) is kept on `cause`.
+ *   try { await loft.user.me(); }
+ *   catch (e) { if (e instanceof LoftError && e.kind === "auth") signIn(); }
+ */
+export type LoftErrorKind =
+  | "auth"       // not signed in or not permitted (401, 403)
+  | "not_found"  // 404 from a call that does not model absence as null
+  | "http"       // any other non-2xx response
+  | "network"    // the request never reached the server
+  | "aborted"    // the caller's AbortSignal fired
+  | "stream"     // a streamed reply ended before it signalled completion
+  | "parse";     // the response body was not the shape the SDK expected
+
+export class LoftError extends Error {
+  readonly kind: LoftErrorKind;
+  /** HTTP status when the failure came from a response, otherwise undefined. */
+  readonly status: number | undefined;
+  constructor(kind: LoftErrorKind, message: string, opts?: { status?: number; cause?: unknown }) {
+    super(message, opts && "cause" in opts ? { cause: opts.cause } : undefined);
+    this.name = "LoftError";
+    this.kind = kind;
+    this.status = opts?.status;
+  }
+}
+
+function kindForStatus(status: number): LoftErrorKind {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 404) return "not_found";
+  return "http";
+}
+
+function failResponse(label: string, status: number, detail?: string): never {
+  const tail = detail ? `: ${detail}` : "";
+  throw new LoftError(kindForStatus(status), `loft: ${label} failed (${status})${tail}`, { status });
+}
+
+// Run a fetch and normalise its two non-HTTP failures (a rejected request, an abort) into a
+// LoftError. A completed response is returned as-is, ok or not, for the caller to interpret.
+async function httpFetch(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") {
+      throw new LoftError("aborted", `loft: request to ${url} was aborted`, { cause });
+    }
+    throw new LoftError("network", `loft: request to ${url} could not reach the server`, { cause });
+  }
+}
+
+async function readJson<T>(res: Response, label: string): Promise<T> {
+  try {
+    return (await res.json()) as T;
+  } catch (cause) {
+    throw new LoftError("parse", `loft: malformed response from ${label}`, { status: res.status, cause });
+  }
+}
+
 export interface LoftUser {
   email: string; // mutable, for display and contact only
   name: string;  // mutable display name
@@ -26,15 +86,15 @@ export interface LoftUpload {
 
 /** The signed-in user, from the auth proxy's identity headers. */
 async function me(): Promise<LoftUser> {
-  const res = await fetch("/api/me", { credentials: "same-origin" });
-  if (!res.ok) throw new Error("loft: not signed in");
-  return res.json() as Promise<LoftUser>;
+  const res = await httpFetch("/api/me", { credentials: "same-origin" });
+  if (!res.ok) failResponse("/api/me", res.status);
+  return readJson<LoftUser>(res, "/api/me");
 }
 
 /** Upload a file; resolves to a /uploads/… URL fetchable only by signed-in users. */
 async function upload(file: File | Blob, name?: string): Promise<LoftUpload> {
   const filename = name ?? (file instanceof File ? file.name : "file");
-  const res = await fetch("/api/upload", {
+  const res = await httpFetch("/api/upload", {
     method: "POST",
     credentials: "same-origin",
     headers: {
@@ -43,17 +103,17 @@ async function upload(file: File | Blob, name?: string): Promise<LoftUpload> {
     },
     body: file,
   });
-  if (!res.ok) throw new Error(`loft: upload failed (${res.status})`);
-  return res.json() as Promise<LoftUpload>;
+  if (!res.ok) failResponse("/api/upload", res.status);
+  return readJson<LoftUpload>(res, "/api/upload");
 }
 
 /** Delete a previously uploaded file. Pass the `url` that loft.upload() returned. Idempotent. */
 async function uploadDelete(url: string): Promise<void> {
-  const res = await fetch(`/api/upload?path=${encodeURIComponent(url)}`, {
+  const res = await httpFetch(`/api/upload?path=${encodeURIComponent(url)}`, {
     method: "DELETE",
     credentials: "same-origin",
   });
-  if (!res.ok) throw new Error(`loft: delete failed (${res.status})`);
+  if (!res.ok) failResponse("/api/upload delete", res.status);
 }
 
 /**
@@ -69,10 +129,10 @@ async function req(method: string, url: string, body?: unknown): Promise<unknown
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(url, init);
+  const res = await httpFetch(url, init);
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`loft.db: ${method} ${url} failed (${res.status})`);
-  return res.json() as unknown;
+  if (!res.ok) failResponse(`${method} ${url}`, res.status);
+  return readJson<unknown>(res, url);
 }
 
 /** Live-change handlers for collection.subscribe(). All optional. */
@@ -227,16 +287,16 @@ export interface LoftChatMessage {
  *   await loft.ai.chat(msgs, { onToken: t => out.append(t) });   // streaming
  */
 async function aiChat(messages: LoftChatMessage[], opts?: { onToken?: (token: string) => void }): Promise<string> {
-  const res = await fetch("/api/ai/chat", {
+  const res = await httpFetch("/api/ai/chat", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: !!opts?.onToken }),
   });
-  if (!res.ok) throw new Error(`loft.ai: ${res.status} ${await res.text().catch(() => "")}`.trim());
+  if (!res.ok) failResponse("/api/ai/chat", res.status, await res.text().catch(() => ""));
 
   if (!opts?.onToken || !res.body) {
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const data = await readJson<{ choices?: { message?: { content?: string } }[] }>(res, "/api/ai/chat");
     return data.choices?.[0]?.message?.content ?? "";
   }
 
@@ -273,7 +333,7 @@ async function aiChat(messages: LoftChatMessage[], opts?: { onToken?: (token: st
       }
     }
   }
-  if (!done) throw new Error("loft.ai: stream ended before completion");
+  if (!done) throw new LoftError("stream", "loft.ai: stream ended before completion");
   return full;
 }
 
