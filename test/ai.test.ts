@@ -79,4 +79,25 @@ describe("loft.ai.stream", () => {
     mockFetch(() => new Response("overloaded", { status: 503 }));
     await expect(collect(loft.ai.stream(ask))).rejects.toMatchObject({ kind: "http", status: 503 });
   });
+
+  it("cancels the underlying stream when the consumer breaks early", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sseFrame({ choices: [{ delta: { content: "a" } }] })));
+        // left open on purpose: the consumer should break before [DONE]
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    mockFetch(() => new Response(stream, { status: 200 }));
+    const tokens: string[] = [];
+    for await (const token of loft.ai.stream(ask)) {
+      tokens.push(token);
+      break;
+    }
+    expect(tokens).toEqual(["a"]);
+    expect(cancelled).toBe(true);
+  });
 });

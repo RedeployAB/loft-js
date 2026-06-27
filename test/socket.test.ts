@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { loft } from "../src/index";
+import { loft, LoftError } from "../src/index";
 import { FakeWebSocket, installSocketGlobals } from "./helpers";
 
 beforeEach(() => {
@@ -60,6 +60,42 @@ describe("loft.socket.channel", () => {
     vi.advanceTimersByTime(20000);
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
+
+  it("cancels a pending reconnect when closed mid-backoff (no leaked socket)", () => {
+    vi.useFakeTimers();
+    const ch = loft.socket.channel("lobby");
+    socket().open();
+    socket().dropFromServer(); // schedules a reconnect
+    ch.close(); // must clear the pending timer
+    vi.advanceTimersByTime(20000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("drops the oldest buffered sends once the cap is reached", () => {
+    const ch = loft.socket.channel("lobby");
+    for (let i = 0; i < 1100; i++) ch.send({ n: i });
+    socket().open(); // flushes the buffer
+    expect(socket().sent).toHaveLength(1000);
+    expect(JSON.parse(socket().sent[0] ?? "{}")).toEqual({ n: 100 }); // first 100 dropped
+  });
+
+  it("reports connection status through onStatus", () => {
+    vi.useFakeTimers();
+    const seen: string[] = [];
+    const ch = loft.socket.channel("lobby", { onStatus: (s) => seen.push(s) });
+    socket().open();
+    socket().dropFromServer();
+    ch.close();
+    expect(seen).toEqual(["open", "reconnecting", "closed"]);
+  });
+
+  it("surfaces a socket error through onError as a LoftError", () => {
+    const errors: unknown[] = [];
+    loft.socket.channel("lobby", { onError: (e) => errors.push(e) });
+    socket().errorEvent();
+    expect(errors[0]).toBeInstanceOf(LoftError);
+    expect(errors[0]).toMatchObject({ kind: "network" });
+  });
 });
 
 describe("collection.subscribe", () => {
@@ -80,5 +116,14 @@ describe("collection.subscribe", () => {
     expect(created).toEqual([{ id: "1" }]);
     expect(updated).toEqual([{ id: "1", done: true }]);
     expect(deleted).toEqual(["1"]);
+  });
+
+  it("ignores a malformed frame instead of throwing", () => {
+    const created: unknown[] = [];
+    loft.db.collection("posts").subscribe({ onCreate: (d) => created.push(d) });
+    socket().open();
+    expect(() => socket().emit("not json")).not.toThrow();
+    socket().emit(JSON.stringify({ op: "create", doc: { id: "1" } }));
+    expect(created).toEqual([{ id: "1" }]);
   });
 });

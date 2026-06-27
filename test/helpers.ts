@@ -18,6 +18,7 @@ export class FakeWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
 
   constructor(url: string) {
     this.url = url;
@@ -40,6 +41,9 @@ export class FakeWebSocket {
   }
   emit(data: string): void {
     this.onmessage?.({ data });
+  }
+  errorEvent(): void {
+    this.onerror?.();
   }
   dropFromServer(): void {
     this.readyState = 3;

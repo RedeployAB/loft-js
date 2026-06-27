@@ -73,6 +73,31 @@ describe("loft.db", () => {
     mockFetch(() => jsonResponse({}, 500));
     await expect(loft.db.collection("posts").list()).rejects.toMatchObject({ kind: "http", status: 500 });
   });
+
+  it("throws not_found on a 404 create rather than resolving to null", async () => {
+    mockFetch(() => jsonResponse({}, 404));
+    await expect(loft.db.collection("posts").create({})).rejects.toMatchObject({ kind: "not_found", status: 404 });
+  });
+
+  it("throws not_found on a 404 list rather than resolving to null", async () => {
+    mockFetch(() => jsonResponse({}, 404));
+    await expect(loft.db.collection("posts").list()).rejects.toMatchObject({ kind: "not_found" });
+  });
+
+  it("includes limit=0 in the query (does not treat 0 as absent)", async () => {
+    mockFetch((url) => {
+      expect(url).toBe("/api/db/posts?limit=0");
+      return jsonResponse([]);
+    });
+    await loft.db.collection("posts").list({ limit: 0 });
+  });
+
+  it("delete resolves true when removed and false when already gone", async () => {
+    mockFetch(() => jsonResponse({ ok: true }));
+    expect(await loft.db.collection("posts").delete("1")).toBe(true);
+    mockFetch(() => jsonResponse({}, 404));
+    expect(await loft.db.collection("posts").delete("missing")).toBe(false);
+  });
 });
 
 describe("loft.upload", () => {
@@ -91,6 +116,15 @@ describe("loft.upload", () => {
     });
   });
 
+  it("percent-encodes a non-ascii filename into the header", async () => {
+    mockFetch((_url, init) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("X-Loft-Filename")).toBe(encodeURIComponent("文档.pdf"));
+      return jsonResponse({ url: "/uploads/x", name: "文档.pdf", size: 1 });
+    });
+    await loft.upload(new Blob(["x"]), { name: "文档.pdf" });
+  });
+
   it("deletes by url", async () => {
     mockFetch((url, init) => {
       expect(init?.method).toBe("DELETE");
@@ -98,5 +132,10 @@ describe("loft.upload", () => {
       return jsonResponse({});
     });
     await loft.upload.delete("/uploads/abc");
+  });
+
+  it("treats a 404 delete as success (idempotent)", async () => {
+    mockFetch(() => jsonResponse({}, 404));
+    await expect(loft.upload.delete("/uploads/gone")).resolves.toBeUndefined();
   });
 });

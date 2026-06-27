@@ -1,14 +1,15 @@
-// Loft browser SDK: a small typed API over the loftd backend so an app hosted on Loft can
-// call loft.db / loft.upload / loft.ai / loft.socket / loft.user instead of writing fetch and
-// auth by hand.
+// Loft browser SDK: a small typed API over the Loft backend so an app hosted on Loft can call
+// loft.db / loft.upload / loft.ai / loft.socket / loft.user instead of writing fetch and auth by
+// hand.
 //
-// Intended use is to import this package and bundle it into your app's own build, which you
-// then upload as part of your deployment:
+// Intended use is to import this package and bundle it into your app's own build, which you then
+// upload as part of your deployment:
 //   import loft from "loft-js";
 //   const me = await loft.user.me();
-// A prebuilt single-file build for a plain <script src="loft.js"> include is also meant to
-// work once it is published. Every call is same-origin to loftd, which holds all credentials
-// and keys server-side, so nothing secret reaches the browser.
+// A prebuilt single-file build for a plain <script src="loft.js"> include is also published. Every
+// call is same-origin to the backend, which holds all credentials and keys server-side, so nothing
+// secret reaches the browser. This module touches fetch/WebSocket/location only at call time, so it
+// imports cleanly under SSR but its calls must run in the browser.
 
 import { createParser } from "eventsource-parser";
 
@@ -52,7 +53,7 @@ function failResponse(label: string, status: number, detail?: string): never {
   throw new LoftError(kindForStatus(status), `loft: ${label} failed (${status})${tail}`, { status });
 }
 
-// Run a fetch and normalise its two non-HTTP failures (a rejected request, an abort) into a
+// Run a fetch and normalise its non-HTTP failures (a rejected request, a cancel, a timeout) into a
 // LoftError. A completed response is returned as-is, ok or not, for the caller to interpret.
 async function httpFetch(url: string, init: RequestInit): Promise<Response> {
   try {
@@ -123,7 +124,9 @@ async function upload(file: File | Blob, opts?: LoftUploadOptions): Promise<Loft
     method: "POST",
     credentials: "same-origin",
     headers: {
-      "X-Loft-Filename": filename,
+      // Percent-encode: a header value must be Latin1, so a raw non-ASCII or newline-bearing
+      // filename would make Request construction throw. The server decodes it.
+      "X-Loft-Filename": encodeURIComponent(filename),
       "Content-Type": file.type || "application/octet-stream",
     },
     body: file,
@@ -132,109 +135,196 @@ async function upload(file: File | Blob, opts?: LoftUploadOptions): Promise<Loft
   return readJson<LoftUpload>(res, "/api/upload");
 }
 
-/** Delete a previously uploaded file. Pass the `url` that loft.upload() returned. Idempotent. */
+/** Delete a previously uploaded file. Pass the `url` that loft.upload() returned. Idempotent: a
+ * second delete (the file already gone) resolves rather than throwing. */
 async function uploadDelete(url: string, opts?: LoftRequestOptions): Promise<void> {
   const res = await httpFetch(`/api/upload?path=${encodeURIComponent(url)}`, withSignal({
     method: "DELETE",
     credentials: "same-origin",
   }, opts));
+  if (res.status === 404) return;
   if (!res.ok) failResponse("/api/upload delete", res.status);
 }
 
 /**
- * A stored document: your fields plus the server-assigned `id` and `creator` (the stable id of the
- * user who created it, stamped server-side from their token, so it's trustworthy). Compare it
- * to `(await loft.user.me()).id` to tell if the current user owns a document.
+ * A stored document: your fields (`T`) plus the server-assigned `id` and `creator`. `creator` is
+ * the stable id of the user who created it, stamped server-side from their token, so it is always
+ * present and trustworthy. Compare it to `(await loft.user.me()).id` to tell if the current user
+ * owns a document.
  */
-export type LoftDoc = { id: string; creator?: string } & Record<string, unknown>;
+export type LoftDoc<T = Record<string, unknown>> = T & {
+  id: string;
+  creator: string;
+};
 
-async function req(method: string, url: string, body?: unknown, opts?: LoftRequestOptions): Promise<unknown> {
+// Shared JSON request helper. `nullable` maps a 404 to null (for get/update/delete, where absence
+// is a normal result); without it a 404 throws a typed not_found, so create/list never resolve to a
+// null that their non-nullable return types deny.
+async function req(
+  method: string,
+  url: string,
+  body?: unknown,
+  opts?: LoftRequestOptions,
+  nullable = false,
+): Promise<unknown> {
   const init: RequestInit = { method, credentials: "same-origin" };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
   const res = await httpFetch(url, withSignal(init, opts));
-  if (res.status === 404) return null;
+  if (nullable && res.status === 404) return null;
   if (!res.ok) failResponse(`${method} ${url}`, res.status);
   return readJson<unknown>(res, url);
 }
 
+/** Connection lifecycle of a realtime handle. */
+export type LoftSocketStatus = "open" | "reconnecting" | "closed";
+
 /** Live-change handlers for collection.subscribe(). All optional. */
-export interface LoftSubscribe {
-  onCreate?: (doc: LoftDoc) => void;
-  onUpdate?: (doc: LoftDoc) => void;
+export interface LoftSubscribe<T = Record<string, unknown>> {
+  onCreate?: (doc: LoftDoc<T>) => void;
+  onUpdate?: (doc: LoftDoc<T>) => void;
   onDelete?: (id: string) => void;
+  /** Called on a socket error (for example the session expired and the upgrade was rejected). */
+  onError?: (err: LoftError) => void;
+  /** Called as the connection opens, drops into reconnect, or is closed by you. */
+  onStatus?: (status: LoftSocketStatus) => void;
 }
 
 /** A handle to one per-site collection, returned by loft.db.collection(). */
-export interface LoftCollection {
-  create(doc: Record<string, unknown>, opts?: LoftRequestOptions): Promise<LoftDoc>;
-  get(id: string, opts?: LoftRequestOptions): Promise<LoftDoc | null>;
+export interface LoftCollection<T = Record<string, unknown>> {
+  create(doc: T, opts?: LoftRequestOptions): Promise<LoftDoc<T>>;
+  get(id: string, opts?: LoftRequestOptions): Promise<LoftDoc<T> | null>;
   // Returns a plain array on purpose. If the backend ever paginates, expose it as an auto-paging
   // async iterable (for await ... of) so callers never handle a cursor, rather than adding a
   // cursor field here. Do not bolt a cursor onto this signature.
-  list(opts?: { limit?: number } & LoftRequestOptions): Promise<LoftDoc[]>;
-  update(id: string, patch: Record<string, unknown>, opts?: LoftRequestOptions): Promise<LoftDoc | null>;
-  delete(id: string, opts?: LoftRequestOptions): Promise<{ ok: true } | null>;
-  subscribe(handlers: LoftSubscribe): () => void;
+  list(opts?: { limit?: number } & LoftRequestOptions): Promise<LoftDoc<T>[]>;
+  update(id: string, patch: Partial<T>, opts?: LoftRequestOptions): Promise<LoftDoc<T> | null>;
+  /** Resolves true if a document was removed, false if it was already gone. */
+  delete(id: string, opts?: LoftRequestOptions): Promise<boolean>;
+  subscribe(handlers: LoftSubscribe<T>): () => void;
+}
+
+// Manage a WebSocket that reconnects with capped, jittered backoff until closed. This is the one
+// teardown path both realtime APIs share: close() stops a pending reconnect (clearTimeout) and the
+// connect() guard prevents a scheduled reconnect from opening a socket after close(), so neither
+// can leak a socket or keep dispatching once the caller is done.
+interface ReconnectHandlers {
+  onMessage: (data: string) => void;
+  onOpen?: (ws: WebSocket) => void;
+  onError?: (err: LoftError) => void;
+  onStatus?: (status: LoftSocketStatus) => void;
+}
+
+function reconnectingSocket(urlFor: () => string, h: ReconnectHandlers): {
+  readonly socket: WebSocket | undefined;
+  close: () => void;
+} {
+  let socket: WebSocket | undefined;
+  let closed = false;
+  let backoff = 500;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const connect = (): void => {
+    if (closed) return;
+    const ws = new WebSocket(urlFor());
+    socket = ws;
+    ws.onopen = () => {
+      backoff = 500;
+      h.onStatus?.("open");
+      h.onOpen?.(ws);
+    };
+    ws.onmessage = (e) => { h.onMessage(e.data as string); };
+    ws.onerror = () => { h.onError?.(new LoftError("network", "loft: realtime socket error")); };
+    ws.onclose = () => {
+      if (closed) return;
+      h.onStatus?.("reconnecting");
+      const wait = backoff + Math.floor(Math.random() * backoff); // jitter to avoid lockstep reconnects
+      backoff = Math.min(backoff * 2, 10000);
+      timer = setTimeout(connect, wait);
+    };
+  };
+  connect();
+  return {
+    get socket() {
+      return socket;
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      if (timer !== undefined) clearTimeout(timer);
+      h.onStatus?.("closed");
+      socket?.close();
+    },
+  };
+}
+
+function wsProtocol(): string {
+  return location.protocol === "https:" ? "wss" : "ws";
 }
 
 /**
  * A per-site collection of schemaless documents. Data is scoped to the site the page is served
- * from, isolated from other sites by the server.
+ * from, isolated from other sites by the server. Pass a type to get typed reads:
+ *   const posts = loft.db.collection<{ title: string; done?: boolean }>('posts');
  *
- * Pass `{ ownerOnly: true }` to make a collection owner-owned: any signed-in user can still
- * read and create, but a document can only be updated or deleted by the user who created it
- * (enforced server-side against their token, not bypassable from the browser). Without it, the
- * collection is shared/collaborative: anyone on the site can edit anything (right for, e.g., a
- * realtime co-editing tool). The mode is fixed when the collection is first created.
- *   const posts = loft.db.collection('posts', { ownerOnly: true });
- *   const p = await posts.create({ title: 'hi' });   // p.creator === me
- *   await posts.update(p.id, { done: true });        // ok, I made it
- *   const stop = posts.subscribe({ onCreate: d => console.log('new', d) });  // live updates
+ * Pass `{ ownerOnly: true }` to make a collection owner-owned: any signed-in user can still read
+ * and create, but a document can only be updated or deleted by the user who created it (enforced
+ * server-side against their token, not bypassable from the browser). Without it, the collection is
+ * shared/collaborative: anyone on the site can edit anything (right for, e.g., a realtime co-editing
+ * tool). The mode is fixed when the collection is first created.
+ *   const p = await posts.create({ title: 'hi' });            // p.creator is my id
+ *   await posts.update(p.id, { done: true });                 // ok, I made it
+ *   const stop = posts.subscribe({ onCreate: d => render(d) }); // live updates
  */
-function collection(name: string, opts?: { ownerOnly?: boolean }): LoftCollection {
+function collection<T = Record<string, unknown>>(
+  name: string,
+  opts?: { ownerOnly?: boolean },
+): LoftCollection<T> {
   const base = `/api/db/${encodeURIComponent(name)}`;
   return {
-    create: (doc: Record<string, unknown>, o?: LoftRequestOptions) =>
-      req("POST", opts?.ownerOnly ? `${base}?ownerOnly=1` : base, doc, o) as Promise<LoftDoc>,
+    create: (doc: T, o?: LoftRequestOptions) =>
+      req("POST", opts?.ownerOnly ? `${base}?ownerOnly=1` : base, doc, o) as Promise<LoftDoc<T>>,
     get: (id: string, o?: LoftRequestOptions) =>
-      req("GET", `${base}/${encodeURIComponent(id)}`, undefined, o) as Promise<LoftDoc | null>,
+      req("GET", `${base}/${encodeURIComponent(id)}`, undefined, o, true) as Promise<LoftDoc<T> | null>,
     list: (o?: { limit?: number } & LoftRequestOptions) =>
-      req("GET", o?.limit ? `${base}?limit=${o.limit}` : base, undefined, o) as Promise<LoftDoc[]>,
-    update: (id: string, patch: Record<string, unknown>, o?: LoftRequestOptions) =>
-      req("PATCH", `${base}/${encodeURIComponent(id)}`, patch, o) as Promise<LoftDoc | null>,
+      req(
+        "GET",
+        o?.limit !== undefined ? `${base}?limit=${encodeURIComponent(String(o.limit))}` : base,
+        undefined,
+        o,
+      ) as Promise<LoftDoc<T>[]>,
+    update: (id: string, patch: Partial<T>, o?: LoftRequestOptions) =>
+      req("PATCH", `${base}/${encodeURIComponent(id)}`, patch, o, true) as Promise<LoftDoc<T> | null>,
     delete: (id: string, o?: LoftRequestOptions) =>
-      req("DELETE", `${base}/${encodeURIComponent(id)}`, undefined, o) as Promise<{ ok: true } | null>,
+      req("DELETE", `${base}/${encodeURIComponent(id)}`, undefined, o, true).then((r) => r !== null),
 
     /**
      * Subscribe to live changes in this collection (other clients' writes too). Returns an
-     * unsubscribe function. Reconnects automatically if the socket drops.
+     * unsubscribe function. Reconnects automatically if the socket drops. Note that writes during a
+     * disconnect are not replayed, so use onStatus to re-list and resync after a reconnect if you
+     * need every change.
      */
-    subscribe(handlers: LoftSubscribe): () => void {
-      let socket: WebSocket | undefined;
-      let closed = false;
-      let backoff = 500;
-      const connect = (): void => {
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        socket = new WebSocket(`${proto}://${location.host}/api/db/subscribe?collection=${encodeURIComponent(name)}`);
-        socket.onopen = () => (backoff = 500);
-        socket.onmessage = (e) => {
-          const m = JSON.parse(e.data as string) as { op: string; doc?: LoftDoc; id?: string };
-          if (m.op === "create" && m.doc) handlers.onCreate?.(m.doc);
-          else if (m.op === "update" && m.doc) handlers.onUpdate?.(m.doc);
-          else if (m.op === "delete" && m.id) handlers.onDelete?.(m.id);
-        };
-        socket.onclose = () => {
-          if (!closed) setTimeout(connect, (backoff = Math.min(backoff * 2, 10000)));
-        };
-      };
-      connect();
-      return () => {
-        closed = true;
-        socket?.close();
-      };
+    subscribe(handlers: LoftSubscribe<T>): () => void {
+      const conn = reconnectingSocket(
+        () => `${wsProtocol()}://${location.host}/api/db/subscribe?collection=${encodeURIComponent(name)}`,
+        {
+          onMessage: (data) => {
+            let m: { op?: string; doc?: LoftDoc<T>; id?: string };
+            try {
+              m = JSON.parse(data) as { op?: string; doc?: LoftDoc<T>; id?: string };
+            } catch {
+              return; // ignore a malformed frame the server should not send
+            }
+            if (m.op === "create" && m.doc) handlers.onCreate?.(m.doc);
+            else if (m.op === "update" && m.doc) handlers.onUpdate?.(m.doc);
+            else if (m.op === "delete" && m.id) handlers.onDelete?.(m.id);
+          },
+          ...(handlers.onError ? { onError: handlers.onError } : {}),
+          ...(handlers.onStatus ? { onStatus: handlers.onStatus } : {}),
+        },
+      );
+      return () => { conn.close(); };
     },
   };
 }
@@ -246,47 +336,54 @@ export interface LoftChannel<T = unknown> {
   close: () => void;
 }
 
+/** Connection callbacks for loft.socket.channel(). */
+export interface LoftChannelOptions {
+  /** Called on a socket error (for example the session expired and the upgrade was rejected). */
+  onError?: (err: LoftError) => void;
+  /** Called as the connection opens, drops into reconnect, or is closed by you. */
+  onStatus?: (status: LoftSocketStatus) => void;
+}
+
 /**
  * Join a realtime channel scoped to this site (ephemeral pub/sub, nothing is stored). A message
  * sent by one client is delivered to every *other* client on the same channel. For chat, presence,
- * multiplayer cursors, live notifications, etc. Reconnects automatically; sends before the socket
- * is open are buffered.
+ * multiplayer cursors, live notifications, etc. Reconnects automatically; sends issued before the
+ * socket is open are buffered (bounded, oldest dropped past the cap). Non-JSON frames are ignored.
  *   const room = loft.socket.channel('lobby');
  *   room.on(m => console.log('peer:', m));
  *   room.send({ hi: 'there' });
  */
-function channelSocket<T = unknown>(name: string): LoftChannel<T> {
-  let socket: WebSocket | undefined;
-  let closed = false;
-  let backoff = 500;
+function channelSocket<T = unknown>(name: string, opts?: LoftChannelOptions): LoftChannel<T> {
   const handlers = new Set<(msg: T) => void>();
   // Buffer for sends issued before the socket is open. Bounded so a long disconnect (or an app that
   // sends in a tight loop while offline) can't grow it without limit; oldest queued messages are
   // dropped once the cap is reached.
   const maxPending = 1000;
   const pending: string[] = [];
-  const connect = (): void => {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/api/socket?channel=${encodeURIComponent(name)}`);
-    socket = ws;
-    ws.onopen = () => {
-      backoff = 500;
-      for (const m of pending.splice(0)) ws.send(m);
-    };
-    ws.onmessage = (e) => {
-      let msg: T;
-      try { msg = JSON.parse(e.data as string) as T; } catch { msg = e.data as T; }
-      handlers.forEach((h) => { h(msg); });
-    };
-    ws.onclose = () => {
-      if (!closed) setTimeout(connect, (backoff = Math.min(backoff * 2, 10000)));
-    };
-  };
-  connect();
+  const conn = reconnectingSocket(
+    () => `${wsProtocol()}://${location.host}/api/socket?channel=${encodeURIComponent(name)}`,
+    {
+      onMessage: (data) => {
+        let msg: T;
+        try {
+          msg = JSON.parse(data) as T;
+        } catch {
+          return; // ignore a non-JSON frame; every send() is JSON, so this is corruption
+        }
+        handlers.forEach((h) => { h(msg); });
+      },
+      onOpen: (ws) => {
+        for (const m of pending.splice(0)) ws.send(m);
+      },
+      ...(opts?.onError ? { onError: opts.onError } : {}),
+      ...(opts?.onStatus ? { onStatus: opts.onStatus } : {}),
+    },
+  );
   return {
     send(msg: T) {
       const s = JSON.stringify(msg);
-      if (socket?.readyState === WebSocket.OPEN) socket.send(s);
+      const ws = conn.socket;
+      if (ws?.readyState === WebSocket.OPEN) ws.send(s);
       else {
         if (pending.length >= maxPending) pending.shift();
         pending.push(s);
@@ -297,8 +394,8 @@ function channelSocket<T = unknown>(name: string): LoftChannel<T> {
       return () => handlers.delete(handler);
     },
     close() {
-      closed = true;
-      socket?.close();
+      handlers.clear();
+      conn.close();
     },
   };
 }
@@ -307,6 +404,12 @@ function channelSocket<T = unknown>(name: string): LoftChannel<T> {
 export interface LoftChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
+}
+
+// Cap the server error body folded into a LoftError message so an upstream provider's detail can't
+// flood a client toast or log.
+function errorDetail(text: string): string {
+  return text.length > 300 ? text.slice(0, 300) + "…" : text;
 }
 
 /**
@@ -322,7 +425,7 @@ async function aiChat(messages: LoftChatMessage[], opts?: LoftRequestOptions): P
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: false }),
   }, opts));
-  if (!res.ok) failResponse("/api/ai/chat", res.status, await res.text().catch(() => ""));
+  if (!res.ok) failResponse("/api/ai/chat", res.status, errorDetail(await res.text().catch(() => "")));
   const data = await readJson<{ choices?: { message?: { content?: string } }[] }>(res, "/api/ai/chat");
   return data.choices?.[0]?.message?.content ?? "";
 }
@@ -344,7 +447,7 @@ async function* aiStream(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: true }),
   }, opts));
-  if (!res.ok) failResponse("/api/ai/chat", res.status, await res.text().catch(() => ""));
+  if (!res.ok) failResponse("/api/ai/chat", res.status, errorDetail(await res.text().catch(() => "")));
   if (!res.body) throw new LoftError("stream", "loft.ai: the server returned no stream body");
 
   // Standard chat-completions stream: SSE `data:` frames carrying choices[0].delta.content,
