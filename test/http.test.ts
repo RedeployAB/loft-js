@@ -84,7 +84,7 @@ describe("loft.upload", () => {
       expect(headers.get("X-Loft-Filename")).toBe("notes.txt");
       return jsonResponse({ url: "/uploads/abc", name: "notes.txt", size: 3 });
     });
-    expect(await loft.upload(new Blob(["abc"]), "notes.txt")).toEqual({
+    expect(await loft.upload(new Blob(["abc"]), { name: "notes.txt" })).toEqual({
       url: "/uploads/abc",
       name: "notes.txt",
       size: 3,

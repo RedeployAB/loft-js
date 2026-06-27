@@ -136,6 +136,7 @@ signed-in users can fetch. Use the URL directly as an `<img src>`, an `href`, an
 
 ```ts
 const { url } = await loft.upload(input.files[0]);
+await loft.upload(blob, { name: "report.pdf" }); // override the stored filename
 await loft.upload.delete(url); // remove it later; idempotent
 ```
 

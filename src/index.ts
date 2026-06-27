@@ -103,6 +103,11 @@ export interface LoftUpload {
   size: number;
 }
 
+/** Options for loft.upload(): an optional stored filename, plus the shared request options. */
+export interface LoftUploadOptions extends LoftRequestOptions {
+  name?: string;
+}
+
 /** The signed-in user, from the auth proxy's identity headers. */
 async function me(opts?: LoftRequestOptions): Promise<LoftUser> {
   const res = await httpFetch("/api/me", withSignal({ credentials: "same-origin" }, opts));
@@ -110,9 +115,10 @@ async function me(opts?: LoftRequestOptions): Promise<LoftUser> {
   return readJson<LoftUser>(res, "/api/me");
 }
 
-/** Upload a file; resolves to a /uploads/… URL fetchable only by signed-in users. */
-async function upload(file: File | Blob, name?: string, opts?: LoftRequestOptions): Promise<LoftUpload> {
-  const filename = name ?? (file instanceof File ? file.name : "file");
+/** Upload a file; resolves to a /uploads/… URL fetchable only by signed-in users. Pass `name`
+ * to set the stored filename, otherwise the File's own name (or "file" for a Blob) is used. */
+async function upload(file: File | Blob, opts?: LoftUploadOptions): Promise<LoftUpload> {
+  const filename = opts?.name ?? (file instanceof File ? file.name : "file");
   const res = await httpFetch("/api/upload", withSignal({
     method: "POST",
     credentials: "same-origin",
@@ -165,6 +171,9 @@ export interface LoftSubscribe {
 export interface LoftCollection {
   create(doc: Record<string, unknown>, opts?: LoftRequestOptions): Promise<LoftDoc>;
   get(id: string, opts?: LoftRequestOptions): Promise<LoftDoc | null>;
+  // Returns a plain array on purpose. If the backend ever paginates, expose it as an auto-paging
+  // async iterable (for await ... of) so callers never handle a cursor, rather than adding a
+  // cursor field here. Do not bolt a cursor onto this signature.
   list(opts?: { limit?: number } & LoftRequestOptions): Promise<LoftDoc[]>;
   update(id: string, patch: Record<string, unknown>, opts?: LoftRequestOptions): Promise<LoftDoc | null>;
   delete(id: string, opts?: LoftRequestOptions): Promise<{ ok: true } | null>;
