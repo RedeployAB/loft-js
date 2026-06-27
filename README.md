@@ -19,11 +19,11 @@ This runs in the browser, in a page served by Loft. It assumes:
 Bundle it into your app and upload the result as part of your deployment:
 
 ```bash
-npm install @loft/sdk
+npm install loft-js
 ```
 
 ```ts
-import loft from "@loft/sdk";
+import loft from "loft-js";
 
 const me = await loft.user.me();
 const { url } = await loft.upload(file);
@@ -34,7 +34,7 @@ Or include the prebuilt single file with a script tag (no build step), which exp
 you:
 
 ```html
-<script src="https://unpkg.com/@loft/sdk@0.1.0/dist/loft.js"></script>
+<script src="https://unpkg.com/loft-js@0.1.0/dist/loft.js"></script>
 <script>
   loft.user.me().then((me) => console.log(me.name));
 </script>
@@ -142,7 +142,7 @@ Every call rejects with a `LoftError` on failure. Switch on `kind` to handle it.
 the HTTP status when the failure came from a response.
 
 ```ts
-import loft, { LoftError } from "@loft/sdk";
+import loft, { LoftError } from "loft-js";
 
 try {
   await loft.user.me();

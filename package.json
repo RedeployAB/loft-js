@@ -1,5 +1,5 @@
 {
-  "name": "@loft/sdk",
+  "name": "loft-js",
   "version": "0.1.0",
   "description": "Browser SDK for Loft-hosted apps: identity, AI chat, document DB, realtime channels, and uploads.",
   "type": "module",
@@ -21,9 +21,6 @@
     "dist"
   ],
   "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/larsakerlund/loft-js.git"

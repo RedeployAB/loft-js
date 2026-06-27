@@ -4,7 +4,7 @@
 //
 // Intended use is to import this package and bundle it into your app's own build, which you
 // then upload as part of your deployment:
-//   import loft from "@loft/sdk";
+//   import loft from "loft-js";
 //   const me = await loft.user.me();
 // A prebuilt single-file build for a plain <script src="loft.js"> include is also meant to
 // work once it is published. Every call is same-origin to loftd, which holds all credentials
