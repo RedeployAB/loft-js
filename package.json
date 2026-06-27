@@ -17,7 +17,9 @@
       "default": "./dist/loft.mjs"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -30,7 +32,12 @@
   "bugs": {
     "url": "https://github.com/larsakerlund/loft-js/issues"
   },
-  "keywords": ["loft", "sdk", "browser", "hosting"],
+  "keywords": [
+    "loft",
+    "sdk",
+    "browser",
+    "hosting"
+  ],
   "scripts": {
     "build:esm": "esbuild src/index.ts --bundle --format=esm --target=es2020 --sourcemap --outfile=dist/loft.mjs",
     "build:cdn": "esbuild src/global.ts --bundle --format=iife --target=es2020 --minify --sourcemap --outfile=dist/loft.js",
@@ -40,6 +47,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepack": "pnpm run build"
   },
   "devDependencies": {
@@ -48,6 +57,7 @@
     "eslint": "^9.39.4",
     "globals": "^17.6.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.61.0"
+    "typescript-eslint": "^8.61.0",
+    "vitest": "^4.1.9"
   }
 }
