@@ -25,6 +25,7 @@ export type LoftErrorKind =
   | "http"       // any other non-2xx response
   | "network"    // the request never reached the server
   | "aborted"    // the caller's AbortSignal fired
+  | "timeout"    // an AbortSignal.timeout() elapsed before the request finished
   | "stream"     // a streamed reply ended before it signalled completion
   | "parse";     // the response body was not the shape the SDK expected
 
@@ -57,6 +58,11 @@ async function httpFetch(url: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(url, init);
   } catch (cause) {
+    // AbortSignal.timeout() aborts with a TimeoutError, a plain controller.abort() with an
+    // AbortError; keep them as distinct kinds so a caller can retry a timeout but not a cancel.
+    if (cause instanceof DOMException && cause.name === "TimeoutError") {
+      throw new LoftError("timeout", `loft: request to ${url} timed out`, { cause });
+    }
     if (cause instanceof DOMException && cause.name === "AbortError") {
       throw new LoftError("aborted", `loft: request to ${url} was aborted`, { cause });
     }
@@ -295,39 +301,48 @@ export interface LoftChatMessage {
 }
 
 /**
- * Send a chat conversation to the platform's model; resolves to the assistant's full reply.
- * Pass `onToken` to stream: it's called with each token as it arrives (the Promise still
- * resolves to the complete text at the end). Without it, the call is non-streaming.
+ * Send a chat conversation to the platform's model and resolve to the assistant's full reply.
+ * For token-by-token output use loft.ai.stream() instead.
  *   const reply = await loft.ai.chat([{ role: 'user', content: 'hi' }]);
- *   await loft.ai.chat(msgs, { onToken: t => out.append(t) });   // streaming
- * Pass `signal` to cancel; an abort rejects with a LoftError of kind "aborted".
+ * Pass `signal` to cancel: a cancel rejects with kind "aborted", a timeout with kind "timeout".
  */
-async function aiChat(
-  messages: LoftChatMessage[],
-  opts?: { onToken?: (token: string) => void } & LoftRequestOptions,
-): Promise<string> {
+async function aiChat(messages: LoftChatMessage[], opts?: LoftRequestOptions): Promise<string> {
   const res = await httpFetch("/api/ai/chat", withSignal({
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: !!opts?.onToken }),
+    body: JSON.stringify({ messages, stream: false }),
   }, opts));
   if (!res.ok) failResponse("/api/ai/chat", res.status, await res.text().catch(() => ""));
+  const data = await readJson<{ choices?: { message?: { content?: string } }[] }>(res, "/api/ai/chat");
+  return data.choices?.[0]?.message?.content ?? "";
+}
 
-  if (!opts?.onToken || !res.body) {
-    const data = await readJson<{ choices?: { message?: { content?: string } }[] }>(res, "/api/ai/chat");
-    return data.choices?.[0]?.message?.content ?? "";
-  }
+/**
+ * Stream the assistant's reply token by token as an async iterable:
+ *   for await (const token of loft.ai.stream(msgs)) out.append(token);
+ * The iterable ends when the reply completes. A truncated stream throws kind "stream", a cancel
+ * "aborted", and a timeout "timeout". Break out of the loop, or pass an aborting `signal`, to stop
+ * early and release the connection.
+ */
+async function* aiStream(
+  messages: LoftChatMessage[],
+  opts?: LoftRequestOptions,
+): AsyncGenerator<string, void, unknown> {
+  const res = await httpFetch("/api/ai/chat", withSignal({
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, stream: true }),
+  }, opts));
+  if (!res.ok) failResponse("/api/ai/chat", res.status, await res.text().catch(() => ""));
+  if (!res.body) throw new LoftError("stream", "loft.ai: the server returned no stream body");
 
   // Standard chat-completions stream: SSE `data:` frames carrying choices[0].delta.content,
-  // terminated by a `data: [DONE]` frame. A missing [DONE] means the reply was truncated. The SSE
-  // framing is parsed by eventsource-parser; we keep the transport so we can POST and cancel.
-  const onToken = opts.onToken;
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let full = "";
-  // Held in an object because onEvent runs in a closure: a bare let would be narrowed to its
-  // initial false in linear flow, so the completion check below would look unreachable.
+  // terminated by `data: [DONE]`. eventsource-parser handles the framing; we own the transport so
+  // we can POST and cancel. parser.feed runs onEvent synchronously, so draining the queue right
+  // after each feed yields tokens in order without buffering the whole reply.
+  const queue: string[] = [];
   const state = { done: false };
   const parser = createParser({
     onEvent(event) {
@@ -338,38 +353,49 @@ async function aiChat(
       try {
         const evt = JSON.parse(event.data) as { choices?: { delta?: { content?: string } }[] };
         const token = evt.choices?.[0]?.delta?.content;
-        if (token) {
-          full += token;
-          onToken(token);
-        }
+        if (token) queue.push(token);
       } catch {
         /* ignore malformed frames the server should not send */
       }
     },
   });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let failure: unknown;
   try {
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
       parser.feed(decoder.decode(chunk.value, { stream: true }));
+      while (queue.length > 0) {
+        const token = queue.shift();
+        if (token !== undefined) yield token;
+      }
     }
   } catch (cause) {
-    if (cause instanceof DOMException && cause.name === "AbortError") {
-      throw new LoftError("aborted", "loft.ai: stream aborted", { cause });
+    failure = cause;
+  } finally {
+    // Release the body whether the loop finished, threw, or the consumer broke out early.
+    await reader.cancel().catch(() => undefined);
+  }
+  if (failure !== undefined) {
+    if (failure instanceof DOMException && failure.name === "TimeoutError") {
+      throw new LoftError("timeout", "loft.ai: stream timed out", { cause: failure });
     }
-    if (cause instanceof LoftError) throw cause;
-    throw new LoftError("network", "loft.ai: stream failed", { cause });
+    if (failure instanceof DOMException && failure.name === "AbortError") {
+      throw new LoftError("aborted", "loft.ai: stream aborted", { cause: failure });
+    }
+    throw new LoftError("network", "loft.ai: stream failed", { cause: failure });
   }
   if (!state.done) throw new LoftError("stream", "loft.ai: stream ended before completion");
-  return full;
 }
 
 export const loft = {
   user: { me },
 
-  // Server-keyed chat completions. Keys stay server-side; model is chosen by
-  // the platform (no model selection). loft.ai.chat([{ role:'user', content:'…' }]) → reply text.
-  ai: { chat: aiChat },
+  // Server-keyed chat completions. Keys stay server-side; model is chosen by the platform (no
+  // model selection). chat() resolves to the full reply; stream() yields tokens as they arrive.
+  ai: { chat: aiChat, stream: aiStream },
 
   // Schemaless, per-site document store, server-isolated, with realtime collection.subscribe().
   db: { collection },

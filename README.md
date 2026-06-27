@@ -119,12 +119,15 @@ const reply = await loft.ai.chat([
 ]);
 ```
 
-Pass `onToken` to stream. It is called with each token as it arrives, and the promise still
-resolves to the complete text at the end:
+For token-by-token output, `loft.ai.stream(messages)` returns an async iterable of tokens:
 
 ```ts
-await loft.ai.chat(messages, { onToken: (t) => output.append(t) });
+for await (const token of loft.ai.stream(messages)) {
+  output.append(token);
+}
 ```
+
+Break out of the loop (or pass an aborting `signal`) to stop early and release the connection.
 
 ### Uploads
 
@@ -160,22 +163,30 @@ try {
 | `http`       | Any other non-2xx response.                                    |
 | `network`    | The request never reached the server.                          |
 | `aborted`    | The request was cancelled through an AbortSignal.              |
+| `timeout`    | An `AbortSignal.timeout()` elapsed before the request finished. |
 | `stream`     | A streamed reply ended before it signalled completion.         |
 | `parse`      | The response body was not the shape the SDK expected.          |
 
 Note that `get`, `update`, and `delete` resolve to `null` for a missing document rather than
 throwing, so a 404 there is a normal result.
 
-## Cancellation
+## Cancellation and timeouts
 
 Every network call takes an optional `signal` so you can cancel an in-flight request, which
-matters most for a long upload or a running chat stream. An abort rejects with a `LoftError` of
+matters most for a long upload or a running chat stream. A cancel rejects with a `LoftError` of
 kind `aborted`.
 
 ```ts
 const controller = new AbortController();
 const reply = loft.ai.chat(messages, { signal: controller.signal });
 controller.abort(); // reply rejects with kind "aborted"
+```
+
+For a deadline, pass `AbortSignal.timeout(ms)`. It rejects with kind `timeout`, distinct from a
+user cancel, so you can retry a timeout without retrying something the user stopped on purpose:
+
+```ts
+await loft.upload(file, { signal: AbortSignal.timeout(10_000) }); // kind "timeout" if it elapses
 ```
 
 ## Build

@@ -30,6 +30,11 @@ describe("loft.user.me", () => {
     await expect(loft.user.me({ signal: ctrl.signal })).rejects.toMatchObject({ kind: "aborted" });
     expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(ctrl.signal);
   });
+
+  it("maps a TimeoutError (AbortSignal.timeout) to kind timeout", async () => {
+    rejectingFetch(new DOMException("slow", "TimeoutError"));
+    await expect(loft.user.me()).rejects.toMatchObject({ kind: "timeout" });
+  });
 });
 
 describe("loft.db", () => {
