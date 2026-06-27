@@ -19,17 +19,28 @@
   },
   "files": ["dist"],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/larsakerlund/loft-js.git"
   },
+  "homepage": "https://github.com/larsakerlund/loft-js#readme",
+  "bugs": {
+    "url": "https://github.com/larsakerlund/loft-js/issues"
+  },
   "keywords": ["loft", "sdk", "browser", "hosting"],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/loft.mjs && esbuild src/index.ts --bundle --format=iife --outfile=dist/loft.js && tsc --emitDeclarationOnly --declaration --outDir dist",
-    "dev": "esbuild src/index.ts --bundle --format=esm --outfile=dist/loft.mjs --watch",
+    "build:esm": "esbuild src/index.ts --bundle --format=esm --target=es2020 --sourcemap --outfile=dist/loft.mjs",
+    "build:cdn": "esbuild src/global.ts --bundle --format=iife --target=es2020 --minify --sourcemap --outfile=dist/loft.js",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "build": "pnpm run build:esm && pnpm run build:cdn && pnpm run build:types",
+    "dev": "esbuild src/index.ts --bundle --format=esm --target=es2020 --outfile=dist/loft.mjs --watch",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "pnpm run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

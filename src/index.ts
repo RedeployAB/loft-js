@@ -300,6 +300,3 @@ export const loft = {
 };
 
 export default loft;
-
-// Expose as a global for plain <script> includes.
-(globalThis as Record<string, unknown>)["loft"] = loft;
