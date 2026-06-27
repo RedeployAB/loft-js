@@ -10,6 +10,8 @@
 // work once it is published. Every call is same-origin to loftd, which holds all credentials
 // and keys server-side, so nothing secret reaches the browser.
 
+import { createParser } from "eventsource-parser";
+
 /**
  * Every loft call rejects with a LoftError on failure. Switch on `kind` to handle one; `status`
  * carries the HTTP status when the failure came from a response (otherwise undefined), and the
@@ -317,39 +319,39 @@ async function aiChat(
     return data.choices?.[0]?.message?.content ?? "";
   }
 
-  // Standard chat-completions stream: `data: {chunk}` frames carrying choices[0].delta.content,
-  // terminated by a `data: [DONE]` line. A missing [DONE] means the reply was truncated.
+  // Standard chat-completions stream: SSE `data:` frames carrying choices[0].delta.content,
+  // terminated by a `data: [DONE]` frame. A missing [DONE] means the reply was truncated. The SSE
+  // framing is parsed by eventsource-parser; we keep the transport so we can POST and cancel.
+  const onToken = opts.onToken;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
   let full = "";
-  let done = false;
+  // Held in an object because onEvent runs in a closure: a bare let would be narrowed to its
+  // initial false in linear flow, so the completion check below would look unreachable.
+  const state = { done: false };
+  const parser = createParser({
+    onEvent(event) {
+      if (event.data === "[DONE]") {
+        state.done = true;
+        return;
+      }
+      try {
+        const evt = JSON.parse(event.data) as { choices?: { delta?: { content?: string } }[] };
+        const token = evt.choices?.[0]?.delta?.content;
+        if (token) {
+          full += token;
+          onToken(token);
+        }
+      } catch {
+        /* ignore malformed frames the server should not send */
+      }
+    },
+  });
   try {
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      let i: number;
-      while ((i = buffer.indexOf("\n\n")) >= 0) {
-        const line = buffer.slice(0, i).split("\n").find((l) => l.startsWith("data:"));
-        buffer = buffer.slice(i + 2);
-        if (!line) continue;
-        const payload = line.slice(5).trim();
-        if (payload === "[DONE]") {
-          done = true;
-          continue;
-        }
-        try {
-          const evt = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
-          const token = evt.choices?.[0]?.delta?.content;
-          if (token) {
-            full += token;
-            opts.onToken(token);
-          }
-        } catch {
-          /* ignore malformed/partial SSE frames */
-        }
-      }
+      parser.feed(decoder.decode(chunk.value, { stream: true }));
     }
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === "AbortError") {
@@ -358,7 +360,7 @@ async function aiChat(
     if (cause instanceof LoftError) throw cause;
     throw new LoftError("network", "loft.ai: stream failed", { cause });
   }
-  if (!done) throw new LoftError("stream", "loft.ai: stream ended before completion");
+  if (!state.done) throw new LoftError("stream", "loft.ai: stream ended before completion");
   return full;
 }
 
