@@ -92,6 +92,43 @@ function withSignal(init: RequestInit, opts?: LoftRequestOptions): RequestInit {
   return opts?.signal ? { ...init, signal: opts.signal } : init;
 }
 
+// Cap the server error body folded into a LoftError message so an upstream provider's detail can't
+// flood a client toast or log.
+function errorDetail(text: string): string {
+  return text.length > 300 ? text.slice(0, 300) + "…" : text;
+}
+
+/** Options the shared request() helper takes on top of the per-call options. */
+interface RequestOptions extends LoftRequestOptions {
+  /** A value to send as a JSON body. */
+  json?: unknown;
+  /** Fold the server's error body into the LoftError message (used by the AI endpoint). */
+  detail?: boolean;
+  /** Treat a 404 as a normal absence (resolve null) instead of throwing not_found. */
+  allow404?: boolean;
+}
+
+// The one way to call the JSON API: a same-origin fetch with a normalised error surface. Sends a
+// JSON body when `json` is given, throws a LoftError on a non-2xx, and returns the successful
+// Response so the caller can read it as JSON, a stream, or nothing. With `allow404` a 404 resolves
+// to null (absence is a normal result for get/update/delete and for delete's idempotency). upload()
+// is the one exception: it sends a binary body, so it builds its own request over httpFetch.
+function request(method: string, url: string, opts: RequestOptions & { allow404: true }): Promise<Response | null>;
+function request(method: string, url: string, opts?: RequestOptions): Promise<Response>;
+async function request(method: string, url: string, opts: RequestOptions = {}): Promise<Response | null> {
+  const init: RequestInit = { method };
+  if (opts.json !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(opts.json);
+  }
+  const res = await httpFetch(url, withSignal(init, opts));
+  if (opts.allow404 && res.status === 404) return null;
+  if (!res.ok) {
+    failResponse(`${method} ${url}`, res.status, opts.detail ? errorDetail(await res.text().catch(() => "")) : undefined);
+  }
+  return res;
+}
+
 export interface LoftUser {
   email: string; // mutable, for display and contact only
   name: string;  // mutable display name
@@ -113,11 +150,12 @@ export interface LoftUploadOptions extends LoftRequestOptions {
 
 /** The signed-in user, from the auth proxy's identity headers. */
 async function me(opts?: LoftRequestOptions): Promise<LoftUser> {
-  const res = await httpFetch("/api/me", withSignal({}, opts));
-  if (!res.ok) failResponse("/api/me", res.status);
+  const res = await request("GET", "/api/me", opts);
   return readJson<LoftUser>(res, "/api/me");
 }
 
+// Upload sends a binary body with a per-file header, so it is the one caller that builds its request
+// over httpFetch directly rather than through request().
 /** Upload a file; resolves to a /uploads/… URL fetchable only by signed-in users. Pass `name`
  * to set the stored filename, otherwise the File's own name (or "file" for a Blob) is used. */
 async function upload(file: File | Blob, opts?: LoftUploadOptions): Promise<LoftUpload> {
@@ -139,11 +177,7 @@ async function upload(file: File | Blob, opts?: LoftUploadOptions): Promise<Loft
 /** Delete a previously uploaded file. Pass the `url` that loft.upload() returned. Idempotent: a
  * second delete (the file already gone) resolves rather than throwing. */
 async function uploadDelete(url: string, opts?: LoftRequestOptions): Promise<void> {
-  const res = await httpFetch(`/api/upload?path=${encodeURIComponent(url)}`, withSignal({
-    method: "DELETE",
-  }, opts));
-  if (res.status === 404) return;
-  if (!res.ok) failResponse("/api/upload delete", res.status);
+  await request("DELETE", `/api/upload?path=${encodeURIComponent(url)}`, { allow404: true, ...opts });
 }
 
 /**
@@ -156,27 +190,6 @@ export type LoftDoc<T = Record<string, unknown>> = T & {
   id: string;
   creator: string;
 };
-
-// Shared JSON request helper. `nullable` maps a 404 to null (for get/update/delete, where absence
-// is a normal result); without it a 404 throws a typed not_found, so create/list never resolve to a
-// null that their non-nullable return types deny.
-async function req(
-  method: string,
-  url: string,
-  body?: unknown,
-  opts?: LoftRequestOptions,
-  nullable = false,
-): Promise<unknown> {
-  const init: RequestInit = { method };
-  if (body !== undefined) {
-    init.headers = { "Content-Type": "application/json" };
-    init.body = JSON.stringify(body);
-  }
-  const res = await httpFetch(url, withSignal(init, opts));
-  if (nullable && res.status === 404) return null;
-  if (!res.ok) failResponse(`${method} ${url}`, res.status);
-  return readJson<unknown>(res, url);
-}
 
 /** Connection lifecycle of a realtime handle. */
 export type LoftSocketStatus = "open" | "reconnecting" | "closed";
@@ -283,22 +296,25 @@ function collection<T = Record<string, unknown>>(
 ): LoftCollection<T> {
   const base = `/api/db/${encodeURIComponent(name)}`;
   const docUrl = (id: string): string => `${base}/${encodeURIComponent(id)}`;
+  // Read a checked Response as a document, passing through the null that an allowed 404 produced.
+  const readDoc = (res: Response | null): Promise<LoftDoc<T> | null> =>
+    res ? readJson<LoftDoc<T>>(res, base) : Promise.resolve(null);
   return {
     create: (doc: T, o?: LoftRequestOptions) =>
-      req("POST", opts?.ownerOnly ? `${base}?ownerOnly=1` : base, doc, o) as Promise<LoftDoc<T>>,
+      request("POST", opts?.ownerOnly ? `${base}?ownerOnly=1` : base, { json: doc, ...o })
+        .then((res) => readJson<LoftDoc<T>>(res, base)),
     get: (id: string, o?: LoftRequestOptions) =>
-      req("GET", docUrl(id), undefined, o, true) as Promise<LoftDoc<T> | null>,
+      request("GET", docUrl(id), { allow404: true, ...o }).then(readDoc),
     list: (o?: { limit?: number } & LoftRequestOptions) =>
-      req(
+      request(
         "GET",
         o?.limit !== undefined ? `${base}?limit=${encodeURIComponent(String(o.limit))}` : base,
-        undefined,
         o,
-      ) as Promise<LoftDoc<T>[]>,
+      ).then((res) => readJson<LoftDoc<T>[]>(res, base)),
     update: (id: string, patch: Partial<T>, o?: LoftRequestOptions) =>
-      req("PATCH", docUrl(id), patch, o, true) as Promise<LoftDoc<T> | null>,
+      request("PATCH", docUrl(id), { json: patch, allow404: true, ...o }).then(readDoc),
     delete: (id: string, o?: LoftRequestOptions) =>
-      req("DELETE", docUrl(id), undefined, o, true).then((r) => r !== null),
+      request("DELETE", docUrl(id), { allow404: true, ...o }).then((res) => res !== null),
 
     /**
      * Subscribe to live changes in this collection (other clients' writes too). Returns an
@@ -407,29 +423,6 @@ export interface LoftChatMessage {
   content: string;
 }
 
-// Cap the server error body folded into a LoftError message so an upstream provider's detail can't
-// flood a client toast or log.
-function errorDetail(text: string): string {
-  return text.length > 300 ? text.slice(0, 300) + "…" : text;
-}
-
-// POST the conversation to the chat endpoint. chat() and stream() send the identical request; only
-// the stream flag and how they read the response differ, so the request and its error handling live
-// here once.
-async function aiRequest(
-  messages: LoftChatMessage[],
-  stream: boolean,
-  opts?: LoftRequestOptions,
-): Promise<Response> {
-  const res = await httpFetch("/api/ai/chat", withSignal({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream }),
-  }, opts));
-  if (!res.ok) failResponse("/api/ai/chat", res.status, errorDetail(await res.text().catch(() => "")));
-  return res;
-}
-
 /**
  * Send a chat conversation to the platform's model and resolve to the assistant's full reply.
  * For token-by-token output use loft.ai.stream() instead.
@@ -437,7 +430,7 @@ async function aiRequest(
  * Pass `signal` to cancel: a cancel rejects with kind "aborted", a timeout with kind "timeout".
  */
 async function aiChat(messages: LoftChatMessage[], opts?: LoftRequestOptions): Promise<string> {
-  const res = await aiRequest(messages, false, opts);
+  const res = await request("POST", "/api/ai/chat", { json: { messages, stream: false }, detail: true, ...opts });
   const data = await readJson<{ choices?: { message?: { content?: string } }[] }>(res, "/api/ai/chat");
   return data.choices?.[0]?.message?.content ?? "";
 }
@@ -453,7 +446,7 @@ async function* aiStream(
   messages: LoftChatMessage[],
   opts?: LoftRequestOptions,
 ): AsyncGenerator<string, void, unknown> {
-  const res = await aiRequest(messages, true, opts);
+  const res = await request("POST", "/api/ai/chat", { json: { messages, stream: true }, detail: true, ...opts });
   if (!res.body) throw new LoftError("stream", "loft.ai: the server returned no stream body");
 
   // Standard chat-completions stream: SSE `data:` frames carrying choices[0].delta.content,
