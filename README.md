@@ -29,12 +29,18 @@ const me = await loft.user.me();
 const { url } = await loft.upload(file);
 ```
 
+The package is ESM-only (no CommonJS build). Import it with `import`, or in a bundler/TypeScript
+project; `require("loft-js")` is not supported.
+
 Or include the prebuilt single file with a script tag (no build step), which exposes a global
-`loft`. Pin a version and use subresource integrity in production so the file cannot change under
-you:
+`loft`. Pin a version and add the subresource-integrity hash so the browser rejects a tampered
+file. Generate the hash for the version you pin with `pnpm run sri`:
 
 ```html
-<script src="https://unpkg.com/loft-js@0.1.0/dist/loft.js"></script>
+<script
+  src="https://unpkg.com/loft-js@0.1.0/dist/loft.js"
+  integrity="sha384-REPLACE_WITH_OUTPUT_OF_pnpm_run_sri"
+  crossorigin="anonymous"></script>
 <script>
   loft.user.me().then((me) => console.log(me.name));
 </script>
@@ -56,15 +62,16 @@ const me = await loft.user.me();
 
 `loft.db.collection(name)` returns a handle to a per-site collection of schemaless documents.
 Data is scoped to the site the page is served from and isolated from other sites by the server.
+Pass a type to get typed reads; without one, fields come back as `unknown`.
 
 ```ts
-const posts = loft.db.collection("posts");
+const posts = loft.db.collection<{ title: string; pinned?: boolean }>("posts");
 
-const post = await posts.create({ title: "Hello", body: "..." });
-const one = await posts.get(post.id);          // LoftDoc, or null if absent
-const many = await posts.list({ limit: 20 });  // LoftDoc[]
-await posts.update(post.id, { pinned: true }); // returns the updated doc, or null
-await posts.delete(post.id);                   // { ok: true }, or null
+const post = await posts.create({ title: "Hello" }); // post.title, post.id, post.creator typed
+const one = await posts.get(post.id);                // the doc, or null if absent
+const many = await posts.list({ limit: 20 });        // an array of docs
+await posts.update(post.id, { pinned: true });       // the updated doc, or null
+await posts.delete(post.id);                         // true if removed, false if already gone
 ```
 
 Every stored document carries a server-assigned `id` and a `creator`, the stable id of the user
@@ -89,9 +96,15 @@ const stop = posts.subscribe({
   onCreate: (doc) => render(doc),
   onUpdate: (doc) => render(doc),
   onDelete: (id) => remove(id),
+  onStatus: (s) => setBanner(s), // "open" | "reconnecting" | "closed"
+  onError: (e) => console.warn(e.kind),
 });
 // later: stop();
 ```
+
+Changes that happen while the socket is disconnected are not replayed. If you need every change,
+re-list on reconnect: call `posts.list()` again when `onStatus` reports `"open"` after a
+`"reconnecting"`.
 
 ### Realtime channels
 
@@ -101,7 +114,10 @@ for chat, presence, multiplayer cursors, or live notifications. It reconnects on
 sends issued before the socket is open are buffered.
 
 ```ts
-const room = loft.socket.channel("lobby");
+const room = loft.socket.channel("lobby", {
+  onStatus: (s) => setBanner(s), // "open" | "reconnecting" | "closed"
+  onError: (e) => console.warn(e.kind),
+});
 const off = room.on((msg) => console.log("peer:", msg));
 room.send({ hello: "there" });
 // later: off(); room.close();
@@ -168,8 +184,9 @@ try {
 | `stream`     | A streamed reply ended before it signalled completion.         |
 | `parse`      | The response body was not the shape the SDK expected.          |
 
-Note that `get`, `update`, and `delete` resolve to `null` for a missing document rather than
-throwing, so a 404 there is a normal result.
+Note that `get` and `update` resolve to `null`, and `delete` resolves to `false`, for a missing
+document rather than throwing, so a 404 there is a normal result. `create` and `list` are not
+nullable: a 404 from them throws `not_found`.
 
 ## Cancellation and timeouts
 
@@ -179,8 +196,13 @@ kind `aborted`.
 
 ```ts
 const controller = new AbortController();
-const reply = loft.ai.chat(messages, { signal: controller.signal });
-controller.abort(); // reply rejects with kind "aborted"
+const replyPromise = loft.ai.chat(messages, { signal: controller.signal });
+controller.abort();
+try {
+  await replyPromise;
+} catch (e) {
+  // e is a LoftError of kind "aborted"
+}
 ```
 
 For a deadline, pass `AbortSignal.timeout(ms)`. It rejects with kind `timeout`, distinct from a
@@ -197,8 +219,8 @@ pnpm install
 pnpm run build
 ```
 
-Emits `dist/loft.mjs` (ES module, used by `import`), `dist/loft.js` (a minified `<script>`
-global), and `dist/index.d.ts` (types), each with a source map.
+Emits `dist/loft.mjs` (ES module, used by `import`) and `dist/loft.js` (a minified `<script>`
+global), each with a source map, plus `dist/index.d.ts` (types).
 
 ## License
 
