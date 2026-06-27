@@ -13,7 +13,7 @@
 export interface LoftUser {
   email: string; // mutable, for display and contact only
   name: string;  // mutable display name
-  /** Stable, immutable identity (Entra object id). Use this for ownership checks, never email/name. */
+  /** Stable, immutable identity from the auth provider. Use this for ownership checks, never email/name. */
   id: string;
 }
 
@@ -24,14 +24,14 @@ export interface LoftUpload {
   size: number;
 }
 
-/** The signed-in employee (from Entra, via the auth proxy's identity headers). */
+/** The signed-in user, from the auth proxy's identity headers. */
 async function me(): Promise<LoftUser> {
   const res = await fetch("/api/me", { credentials: "same-origin" });
   if (!res.ok) throw new Error("loft: not signed in");
   return res.json() as Promise<LoftUser>;
 }
 
-/** Upload a file; resolves to a /uploads/… URL fetchable only by signed-in employees. */
+/** Upload a file; resolves to a /uploads/… URL fetchable only by signed-in users. */
 async function upload(file: File | Blob, name?: string): Promise<LoftUpload> {
   const filename = name ?? (file instanceof File ? file.name : "file");
   const res = await fetch("/api/upload", {
@@ -58,7 +58,7 @@ async function uploadDelete(url: string): Promise<void> {
 
 /**
  * A stored document: your fields plus the server-assigned `id` and `creator` (the stable id of the
- * employee who created it, stamped server-side from their token, so it's trustworthy). Compare it
+ * user who created it, stamped server-side from their token, so it's trustworthy). Compare it
  * to `(await loft.user.me()).id` to tell if the current user owns a document.
  */
 export type LoftDoc = { id: string; creator?: string } & Record<string, unknown>;
@@ -94,10 +94,10 @@ export interface LoftCollection {
 
 /**
  * A per-site collection of schemaless documents. Data is scoped to the site the page is served
- * from, isolated from other sites by the server (Postgres row-level security).
+ * from, isolated from other sites by the server.
  *
- * Pass `{ ownerOnly: true }` to make a collection owner-owned: any signed-in employee can still
- * read and create, but a document can only be updated or deleted by the employee who created it
+ * Pass `{ ownerOnly: true }` to make a collection owner-owned: any signed-in user can still
+ * read and create, but a document can only be updated or deleted by the user who created it
  * (enforced server-side against their token, not bypassable from the browser). Without it, the
  * collection is shared/collaborative: anyone on the site can edit anything (right for, e.g., a
  * realtime co-editing tool). The mode is fixed when the collection is first created.
@@ -280,19 +280,19 @@ async function aiChat(messages: LoftChatMessage[], opts?: { onToken?: (token: st
 export const loft = {
   user: { me },
 
-  // Server-keyed chat completions (Azure AI Foundry). Keys stay server-side; model is chosen by
+  // Server-keyed chat completions. Keys stay server-side; model is chosen by
   // the platform (no model selection). loft.ai.chat([{ role:'user', content:'…' }]) → reply text.
   ai: { chat: aiChat },
 
-  // Schemaless, per-site document store (Postgres + RLS), with realtime collection.subscribe().
+  // Schemaless, per-site document store, server-isolated, with realtime collection.subscribe().
   db: { collection },
 
   // Ephemeral per-site realtime channels (chat/presence/multiplayer), nothing persisted.
   socket: { channel: channelSocket },
 
   /**
-   * Upload a file. Stored server-side (Azure Blob); returns a URL under /uploads/…
-   * that only signed-in employees can fetch. Use it directly as an <img src>, href, etc.
+   * Upload a file. Stored server-side; returns a URL under /uploads/…
+   * that only signed-in users can fetch. Use it directly as an <img src>, href, etc.
    *   const { url } = await loft.upload(input.files[0]);
    *   await loft.upload.delete(url);   // remove it later
    */
