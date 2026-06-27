@@ -1,6 +1,6 @@
 # loft-js
 
-A small typed browser SDK for apps hosted on Loft. It wraps the Loft backend so your app can
+A small typed browser SDK for apps hosted on [Loft](https://github.com/larsakerlund/loft). It wraps the Loft backend so your app can
 call identity, uploads, a document database, AI chat, and realtime channels without writing fetch
 and auth by hand. Every call is same-origin to the backend, which holds all credentials and keys
 server-side, so nothing secret reaches the browser.
