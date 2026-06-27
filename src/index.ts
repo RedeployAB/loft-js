@@ -70,6 +70,17 @@ async function readJson<T>(res: Response, label: string): Promise<T> {
   }
 }
 
+/** Options every network call accepts. Pass an AbortSignal to cancel an in-flight request. */
+export interface LoftRequestOptions {
+  signal?: AbortSignal;
+}
+
+// Attach the caller's AbortSignal to a fetch init when they passed one. exactOptionalPropertyTypes
+// forbids signal: undefined, so only add the key when it is present.
+function withSignal(init: RequestInit, opts?: LoftRequestOptions): RequestInit {
+  return opts?.signal ? { ...init, signal: opts.signal } : init;
+}
+
 export interface LoftUser {
   email: string; // mutable, for display and contact only
   name: string;  // mutable display name
@@ -85,16 +96,16 @@ export interface LoftUpload {
 }
 
 /** The signed-in user, from the auth proxy's identity headers. */
-async function me(): Promise<LoftUser> {
-  const res = await httpFetch("/api/me", { credentials: "same-origin" });
+async function me(opts?: LoftRequestOptions): Promise<LoftUser> {
+  const res = await httpFetch("/api/me", withSignal({ credentials: "same-origin" }, opts));
   if (!res.ok) failResponse("/api/me", res.status);
   return readJson<LoftUser>(res, "/api/me");
 }
 
 /** Upload a file; resolves to a /uploads/… URL fetchable only by signed-in users. */
-async function upload(file: File | Blob, name?: string): Promise<LoftUpload> {
+async function upload(file: File | Blob, name?: string, opts?: LoftRequestOptions): Promise<LoftUpload> {
   const filename = name ?? (file instanceof File ? file.name : "file");
-  const res = await httpFetch("/api/upload", {
+  const res = await httpFetch("/api/upload", withSignal({
     method: "POST",
     credentials: "same-origin",
     headers: {
@@ -102,17 +113,17 @@ async function upload(file: File | Blob, name?: string): Promise<LoftUpload> {
       "Content-Type": file.type || "application/octet-stream",
     },
     body: file,
-  });
+  }, opts));
   if (!res.ok) failResponse("/api/upload", res.status);
   return readJson<LoftUpload>(res, "/api/upload");
 }
 
 /** Delete a previously uploaded file. Pass the `url` that loft.upload() returned. Idempotent. */
-async function uploadDelete(url: string): Promise<void> {
-  const res = await httpFetch(`/api/upload?path=${encodeURIComponent(url)}`, {
+async function uploadDelete(url: string, opts?: LoftRequestOptions): Promise<void> {
+  const res = await httpFetch(`/api/upload?path=${encodeURIComponent(url)}`, withSignal({
     method: "DELETE",
     credentials: "same-origin",
-  });
+  }, opts));
   if (!res.ok) failResponse("/api/upload delete", res.status);
 }
 
@@ -123,13 +134,13 @@ async function uploadDelete(url: string): Promise<void> {
  */
 export type LoftDoc = { id: string; creator?: string } & Record<string, unknown>;
 
-async function req(method: string, url: string, body?: unknown): Promise<unknown> {
+async function req(method: string, url: string, body?: unknown, opts?: LoftRequestOptions): Promise<unknown> {
   const init: RequestInit = { method, credentials: "same-origin" };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
-  const res = await httpFetch(url, init);
+  const res = await httpFetch(url, withSignal(init, opts));
   if (res.status === 404) return null;
   if (!res.ok) failResponse(`${method} ${url}`, res.status);
   return readJson<unknown>(res, url);
@@ -144,11 +155,11 @@ export interface LoftSubscribe {
 
 /** A handle to one per-site collection, returned by loft.db.collection(). */
 export interface LoftCollection {
-  create(doc: Record<string, unknown>): Promise<LoftDoc>;
-  get(id: string): Promise<LoftDoc | null>;
-  list(opts?: { limit?: number }): Promise<LoftDoc[]>;
-  update(id: string, patch: Record<string, unknown>): Promise<LoftDoc | null>;
-  delete(id: string): Promise<{ ok: true } | null>;
+  create(doc: Record<string, unknown>, opts?: LoftRequestOptions): Promise<LoftDoc>;
+  get(id: string, opts?: LoftRequestOptions): Promise<LoftDoc | null>;
+  list(opts?: { limit?: number } & LoftRequestOptions): Promise<LoftDoc[]>;
+  update(id: string, patch: Record<string, unknown>, opts?: LoftRequestOptions): Promise<LoftDoc | null>;
+  delete(id: string, opts?: LoftRequestOptions): Promise<{ ok: true } | null>;
   subscribe(handlers: LoftSubscribe): () => void;
 }
 
@@ -169,14 +180,16 @@ export interface LoftCollection {
 function collection(name: string, opts?: { ownerOnly?: boolean }): LoftCollection {
   const base = `/api/db/${encodeURIComponent(name)}`;
   return {
-    create: (doc: Record<string, unknown>) =>
-      req("POST", opts?.ownerOnly ? `${base}?ownerOnly=1` : base, doc) as Promise<LoftDoc>,
-    get: (id: string) => req("GET", `${base}/${encodeURIComponent(id)}`) as Promise<LoftDoc | null>,
-    list: (opts?: { limit?: number }) =>
-      req("GET", opts?.limit ? `${base}?limit=${opts.limit}` : base) as Promise<LoftDoc[]>,
-    update: (id: string, patch: Record<string, unknown>) =>
-      req("PATCH", `${base}/${encodeURIComponent(id)}`, patch) as Promise<LoftDoc | null>,
-    delete: (id: string) => req("DELETE", `${base}/${encodeURIComponent(id)}`) as Promise<{ ok: true } | null>,
+    create: (doc: Record<string, unknown>, o?: LoftRequestOptions) =>
+      req("POST", opts?.ownerOnly ? `${base}?ownerOnly=1` : base, doc, o) as Promise<LoftDoc>,
+    get: (id: string, o?: LoftRequestOptions) =>
+      req("GET", `${base}/${encodeURIComponent(id)}`, undefined, o) as Promise<LoftDoc | null>,
+    list: (o?: { limit?: number } & LoftRequestOptions) =>
+      req("GET", o?.limit ? `${base}?limit=${o.limit}` : base, undefined, o) as Promise<LoftDoc[]>,
+    update: (id: string, patch: Record<string, unknown>, o?: LoftRequestOptions) =>
+      req("PATCH", `${base}/${encodeURIComponent(id)}`, patch, o) as Promise<LoftDoc | null>,
+    delete: (id: string, o?: LoftRequestOptions) =>
+      req("DELETE", `${base}/${encodeURIComponent(id)}`, undefined, o) as Promise<{ ok: true } | null>,
 
     /**
      * Subscribe to live changes in this collection (other clients' writes too). Returns an
@@ -285,14 +298,18 @@ export interface LoftChatMessage {
  * resolves to the complete text at the end). Without it, the call is non-streaming.
  *   const reply = await loft.ai.chat([{ role: 'user', content: 'hi' }]);
  *   await loft.ai.chat(msgs, { onToken: t => out.append(t) });   // streaming
+ * Pass `signal` to cancel; an abort rejects with a LoftError of kind "aborted".
  */
-async function aiChat(messages: LoftChatMessage[], opts?: { onToken?: (token: string) => void }): Promise<string> {
-  const res = await httpFetch("/api/ai/chat", {
+async function aiChat(
+  messages: LoftChatMessage[],
+  opts?: { onToken?: (token: string) => void } & LoftRequestOptions,
+): Promise<string> {
+  const res = await httpFetch("/api/ai/chat", withSignal({
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: !!opts?.onToken }),
-  });
+  }, opts));
   if (!res.ok) failResponse("/api/ai/chat", res.status, await res.text().catch(() => ""));
 
   if (!opts?.onToken || !res.body) {
@@ -307,31 +324,39 @@ async function aiChat(messages: LoftChatMessage[], opts?: { onToken?: (token: st
   let buffer = "";
   let full = "";
   let done = false;
-  for (;;) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    buffer += decoder.decode(chunk.value, { stream: true });
-    let i: number;
-    while ((i = buffer.indexOf("\n\n")) >= 0) {
-      const line = buffer.slice(0, i).split("\n").find((l) => l.startsWith("data:"));
-      buffer = buffer.slice(i + 2);
-      if (!line) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]") {
-        done = true;
-        continue;
-      }
-      try {
-        const evt = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
-        const token = evt.choices?.[0]?.delta?.content;
-        if (token) {
-          full += token;
-          opts.onToken(token);
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let i: number;
+      while ((i = buffer.indexOf("\n\n")) >= 0) {
+        const line = buffer.slice(0, i).split("\n").find((l) => l.startsWith("data:"));
+        buffer = buffer.slice(i + 2);
+        if (!line) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") {
+          done = true;
+          continue;
         }
-      } catch {
-        /* ignore malformed/partial SSE frames */
+        try {
+          const evt = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+          const token = evt.choices?.[0]?.delta?.content;
+          if (token) {
+            full += token;
+            opts.onToken(token);
+          }
+        } catch {
+          /* ignore malformed/partial SSE frames */
+        }
       }
     }
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") {
+      throw new LoftError("aborted", "loft.ai: stream aborted", { cause });
+    }
+    if (cause instanceof LoftError) throw cause;
+    throw new LoftError("network", "loft.ai: stream failed", { cause });
   }
   if (!done) throw new LoftError("stream", "loft.ai: stream ended before completion");
   return full;
