@@ -1,3 +1,6 @@
 node_modules/
 dist/
 .DS_Store
+
+# Local, private working notes (never committed)
+CLAUDE.local.md
