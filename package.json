@@ -1,6 +1,6 @@
 {
   "name": "loft-js",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Browser SDK for Loft-hosted apps: identity, AI chat, document DB, realtime channels, and uploads.",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
@@ -47,15 +47,18 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:package": "publint && attw --pack . --profile esm-only",
     "sri": "pnpm run build:cdn && node scripts/sri.mjs",
     "prepare": "pnpm run build"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.4",
     "@eslint/js": "^9.39.4",
     "esbuild": "^0.28.1",
     "eslint": "^9.39.4",
     "eventsource-parser": "^3.1.0",
     "globals": "^17.6.0",
+    "publint": "^0.3.21",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.0",
     "vitest": "^4.1.9"

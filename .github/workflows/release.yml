@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # release-please pushes the release commit and tag
+  pull-requests: write # release-please maintains the Release PR
+  id-token: write # npm provenance
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # On a normal push, this opens or updates the Release PR. When that PR is merged, this same
+      # run sees release_created and publishes. Keeping publish in the same job avoids the
+      # GITHUB_TOKEN limitation where a release it creates would not trigger a separate workflow.
+      - uses: googleapis/release-please-action@v4
+        id: release
+
+      - uses: actions/checkout@v4
+        if: ${{ steps.release.outputs.release_created }}
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.release.outputs.release_created }}
+      - uses: actions/setup-node@v4
+        if: ${{ steps.release.outputs.release_created }}
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        if: ${{ steps.release.outputs.release_created }}
+      - run: pnpm run typecheck && pnpm run lint && pnpm test && pnpm run check:package
+        if: ${{ steps.release.outputs.release_created }}
+      # npm publish runs the prepare script, which builds dist. Provenance requires a public repo.
+      - run: npm publish --provenance --access public
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
