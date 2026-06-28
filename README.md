@@ -46,9 +46,6 @@ Or include the prebuilt single file with a script tag (no build step), which exp
 
 <!-- x-release-please-end -->
 
-For production you can also add a subresource-integrity hash so the browser rejects a tampered
-file; `pnpm run sri` prints it for the version you pin.
-
 ## API
 
 ### Identity

@@ -48,7 +48,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check:package": "publint && attw --pack . --profile esm-only",
-    "sri": "pnpm run build:cdn && node scripts/sri.mjs",
     "prepare": "pnpm run build"
   },
   "devDependencies": {
