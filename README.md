@@ -33,22 +33,21 @@ The package is ESM-only (no CommonJS build). Import it with `import`, or in a bu
 project; `require("loft-js")` is not supported.
 
 Or include the prebuilt single file with a script tag (no build step), which exposes a global
-`loft`. Pin a version and add the subresource-integrity hash so the browser rejects a tampered
-file. Generate the hash for the version you pin with `pnpm run sri`:
+`loft`. Pin a version so the file cannot change under you:
 
 <!-- x-release-please-start-version -->
 
 ```html
-<script
-  src="https://unpkg.com/loft-js@0.1.0/dist/loft.js"
-  integrity="sha384-REPLACE_WITH_OUTPUT_OF_pnpm_run_sri"
-  crossorigin="anonymous"></script>
+<script src="https://unpkg.com/loft-js@0.1.0/dist/loft.js"></script>
 <script>
   loft.user.me().then((me) => console.log(me.name));
 </script>
 ```
 
 <!-- x-release-please-end -->
+
+For production you can also add a subresource-integrity hash so the browser rejects a tampered
+file; `pnpm run sri` prints it for the version you pin.
 
 ## API
 
