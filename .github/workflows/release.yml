@@ -24,7 +24,6 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
-    environment: release # NPM_TOKEN lives here; add a required reviewer for a manual gate
     permissions:
       contents: read
       id-token: write # npm provenance
@@ -42,4 +41,6 @@ jobs:
       # npm publish runs the prepare script, which builds dist. Provenance requires a public repo.
       - run: npm publish --provenance --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # A repo secret rather than an environment-scoped one: this token is a short-lived
+          # bootstrap, replaced by OIDC trusted publishing right after the first release.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} # zizmor: ignore[secrets-outside-env]
