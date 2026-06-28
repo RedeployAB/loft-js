@@ -1,6 +1,6 @@
 {
   "name": "loft-js",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Browser SDK for Loft-hosted apps: identity, AI chat, document DB, realtime channels, and uploads.",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
