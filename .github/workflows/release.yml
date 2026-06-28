@@ -4,37 +4,42 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write # release-please pushes the release commit and tag
-  pull-requests: write # release-please maintains the Release PR
-  id-token: write # npm provenance
+permissions: {}
 
 jobs:
-  release:
+  # On a normal push this opens or updates the Release PR. When that PR is merged, release_created
+  # becomes true and the publish job runs.
+  release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release commit and tag
+      pull-requests: write # maintain the Release PR
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
     steps:
-      # On a normal push, this opens or updates the Release PR. When that PR is merged, this same
-      # run sees release_created and publishes. Keeping publish in the same job avoids the
-      # GITHUB_TOKEN limitation where a release it creates would not trigger a separate workflow.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
 
-      - uses: actions/checkout@v4
-        if: ${{ steps.release.outputs.release_created }}
-      - uses: pnpm/action-setup@v4
-        if: ${{ steps.release.outputs.release_created }}
-      - uses: actions/setup-node@v4
-        if: ${{ steps.release.outputs.release_created }}
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    environment: release # NPM_TOKEN lives here; add a required reviewer for a manual gate
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-          cache: pnpm
       - run: pnpm install --frozen-lockfile
-        if: ${{ steps.release.outputs.release_created }}
       - run: pnpm run typecheck && pnpm run lint && pnpm test && pnpm run check:package
-        if: ${{ steps.release.outputs.release_created }}
       # npm publish runs the prepare script, which builds dist. Provenance requires a public repo.
       - run: npm publish --provenance --access public
-        if: ${{ steps.release.outputs.release_created }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
