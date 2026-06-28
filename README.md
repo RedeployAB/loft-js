@@ -36,6 +36,8 @@ Or include the prebuilt single file with a script tag (no build step), which exp
 `loft`. Pin a version and add the subresource-integrity hash so the browser rejects a tampered
 file. Generate the hash for the version you pin with `pnpm run sri`:
 
+<!-- x-release-please-start-version -->
+
 ```html
 <script
   src="https://unpkg.com/loft-js@0.1.0/dist/loft.js"
@@ -45,6 +47,8 @@ file. Generate the hash for the version you pin with `pnpm run sri`:
   loft.user.me().then((me) => console.log(me.name));
 </script>
 ```
+
+<!-- x-release-please-end -->
 
 ## API
 
