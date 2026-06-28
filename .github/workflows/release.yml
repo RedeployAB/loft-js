@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # npm provenance
+      id-token: write # OIDC trusted publishing + provenance
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -38,9 +38,8 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck && pnpm run lint && pnpm test && pnpm run check:package
-      # npm publish runs the prepare script, which builds dist. Provenance requires a public repo.
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; the runner's bundled npm is older.
+      - run: npm install -g npm@latest
+      # Auth is OIDC via the trusted publisher configured on npm for this repo and workflow, so there
+      # is no token. npm publish runs the prepare script (builds dist); provenance needs a public repo.
       - run: npm publish --provenance --access public
-        env:
-          # A repo secret rather than an environment-scoped one: this token is a short-lived
-          # bootstrap, replaced by OIDC trusted publishing right after the first release.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} # zizmor: ignore[secrets-outside-env]
