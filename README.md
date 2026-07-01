@@ -5,15 +5,6 @@ call identity, uploads, a document database, AI chat, and realtime channels with
 and auth by hand. Every call is same-origin to the backend, which holds all credentials and keys
 server-side, so nothing secret reaches the browser.
 
-## Requirements
-
-This runs in the browser, in a page served by Loft. It assumes:
-
-- A browser environment. It uses `fetch`, `WebSocket`, and `location`, so it does not run under
-  plain Node or during server-side rendering. Guard any SDK call so it only runs on the client.
-- Same-origin hosting. Every request goes to a relative path (`/api/...`) on the page's own
-  origin, with cookies, so the page must be served by Loft.
-
 ## Install
 
 Bundle it into your app and upload the result as part of your deployment:
@@ -29,9 +20,6 @@ const me = await loft.user.me();
 const { url } = await loft.upload(file);
 ```
 
-The package is ESM-only (no CommonJS build). Import it with `import`, or in a bundler/TypeScript
-project; `require("loft-js")` is not supported.
-
 Or include the prebuilt single file with a script tag (no build step), which exposes a global
 `loft`. Pin a version so the file cannot change under you:
 
@@ -45,6 +33,21 @@ Or include the prebuilt single file with a script tag (no build step), which exp
 ```
 
 <!-- x-release-please-end -->
+
+## Deploy
+
+Build your site to a static folder, then deploy that folder to a Loft:
+
+```bash
+npm i -g loft-cli
+loft login <your-loft-url>
+loft deploy ./dist my-app          # live at https://my-app.<your-loft-url>
+```
+
+Or open your Loft in a browser and drag the built folder onto the page.
+
+No Loft to deploy to yet? See the [loft](https://github.com/larsakerlund/loft) repo to
+run one.
 
 ## API
 
@@ -184,7 +187,7 @@ try {
 | `stream`     | A streamed reply ended before it signalled completion.         |
 | `parse`      | The response body was not the shape the SDK expected.          |
 
-Note that `get` and `update` resolve to `null`, and `delete` resolves to `false`, for a missing
+`get` and `update` resolve to `null`, and `delete` resolves to `false`, for a missing
 document rather than throwing, so a 404 there is a normal result. `create` and `list` are not
 nullable: a 404 from them throws `not_found`.
 
