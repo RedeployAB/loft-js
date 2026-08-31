@@ -24,11 +24,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/larsakerlund/loft-js.git"
+    "url": "git+https://github.com/RedeployAB/loft-js.git"
   },
-  "homepage": "https://github.com/larsakerlund/loft-js#readme",
+  "homepage": "https://github.com/RedeployAB/loft-js#readme",
   "bugs": {
-    "url": "https://github.com/larsakerlund/loft-js/issues"
+    "url": "https://github.com/RedeployAB/loft-js/issues"
   },
   "keywords": [
     "loft",

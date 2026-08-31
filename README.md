@@ -1,6 +1,6 @@
 # loft-js
 
-A small typed browser SDK for apps hosted on [Loft](https://github.com/larsakerlund/loft). It wraps the Loft backend so your app can
+A small typed browser SDK for apps hosted on [Loft](https://github.com/RedeployAB/loft). It wraps the Loft backend so your app can
 call identity, uploads, a document database, AI chat, and realtime channels without writing fetch
 and auth by hand. Every call is same-origin to the backend, which holds all credentials and keys
 server-side, so nothing secret reaches the browser.
@@ -46,7 +46,7 @@ loft deploy ./dist my-app          # live at https://my-app.<your-loft-url>
 
 Or open your Loft in a browser and drag the built folder onto the page.
 
-No Loft to deploy to yet? See the [loft](https://github.com/larsakerlund/loft) repo to
+No Loft to deploy to yet? See the [loft](https://github.com/RedeployAB/loft) repo to
 run one.
 
 ## API
