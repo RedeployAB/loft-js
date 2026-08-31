@@ -26,7 +26,7 @@ Or include the prebuilt single file with a script tag (no build step), which exp
 <!-- x-release-please-start-version -->
 
 ```html
-<script src="https://unpkg.com/loft-js@0.1.0/dist/loft.js"></script>
+<script src="https://unpkg.com/loft-js@0.1.1/dist/loft.js"></script>
 <script>
   loft.user.me().then((me) => console.log(me.name));
 </script>
